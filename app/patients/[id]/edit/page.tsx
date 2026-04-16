@@ -3,9 +3,7 @@
 import AppLayout from '@/components/AppLayout';
 import { useAuth } from '@/lib/AuthContext';
 import { useState, useEffect } from 'react';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
-import { db, auth } from '@/lib/firebase';
-import { handleFirestoreError, OperationType } from '@/lib/firestore-error';
+import { createClient } from '@/lib/supabase/client';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { LAB_TEMPLATES } from '@/lib/templates';
@@ -18,6 +16,7 @@ export default function EditPatientPage() {
   const params = useParams();
   const patientId = params.id as string;
   const { showToast } = useToast();
+  const supabase = createClient();
   
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(true);
@@ -29,8 +28,8 @@ export default function EditPatientPage() {
     gender: 'Male',
     phone: '',
     email: '',
-    referredByDr: '',
-    clientAddress: ''
+    referred_by_dr: '',
+    address: ''
   });
   
   const [selectedTests, setSelectedTests] = useState<string[]>([]);
@@ -40,33 +39,45 @@ export default function EditPatientPage() {
     
     const fetchData = async () => {
       try {
-        const userDocRef = doc(db, 'users', user.uid);
-        const userDocSnap = await getDoc(userDocRef);
-        if (userDocSnap.exists()) {
-          setTestCharges(userDocSnap.data().testCharges || {});
+        // Fetch user settings for test charges
+        const { data: userData } = await supabase
+          .from('user_settings')
+          .select('test_charges')
+          .eq('user_id', user.id)
+          .single();
+        
+        if (userData?.test_charges) {
+          setTestCharges(userData.test_charges);
         }
 
-        const patientDocRef = doc(db, 'patients', patientId);
-        const patientDocSnap = await getDoc(patientDocRef);
-        if (patientDocSnap.exists()) {
-          const data = patientDocSnap.data();
-          if (data.doctorId !== user.uid) {
-            router.push('/patients');
-            return;
-          }
-          setFormData({
-            name: data.name || '',
-            age: data.age?.toString() || '',
-            gender: data.gender || 'Male',
-            phone: data.phone || '',
-            email: data.email || '',
-            referredByDr: data.referredByDr || '',
-            clientAddress: data.clientAddress || ''
-          });
-          setSelectedTests(data.assignedTests || []);
-        } else {
+        // Fetch patient data
+        const { data: patientData, error } = await supabase
+          .from('patients')
+          .select('*')
+          .eq('id', patientId)
+          .single();
+        
+        if (error || !patientData) {
           router.push('/patients');
+          return;
         }
+        
+        // Check if user owns this patient
+        if (patientData.user_id !== user.id) {
+          router.push('/patients');
+          return;
+        }
+        
+        setFormData({
+          name: patientData.name || '',
+          age: patientData.age?.toString() || '',
+          gender: patientData.gender || 'Male',
+          phone: patientData.phone || '',
+          email: patientData.email || '',
+          referred_by_dr: patientData.referred_by_dr || '',
+          address: patientData.address || ''
+        });
+        setSelectedTests(patientData.assigned_tests || []);
       } catch (error) {
         console.error("Error fetching data:", error);
       } finally {
@@ -75,7 +86,7 @@ export default function EditPatientPage() {
     };
     
     fetchData();
-  }, [user, patientId, router]);
+  }, [user, patientId, router, supabase]);
 
   const handleTestToggle = (templateId: string) => {
     setSelectedTests(prev => 
@@ -93,21 +104,27 @@ export default function EditPatientPage() {
     
     setLoading(true);
     try {
-      await updateDoc(doc(db, 'patients', patientId), {
-        name: formData.name,
-        age: parseInt(formData.age),
-        gender: formData.gender,
-        phone: formData.phone,
-        email: formData.email,
-        referredByDr: formData.referredByDr,
-        clientAddress: formData.clientAddress,
-        assignedTests: selectedTests,
-        totalBill: totalBill
-      });
+      const { error } = await supabase
+        .from('patients')
+        .update({
+          name: formData.name,
+          age: parseInt(formData.age),
+          gender: formData.gender,
+          phone: formData.phone || null,
+          email: formData.email || null,
+          referred_by_dr: formData.referred_by_dr || null,
+          address: formData.address || null,
+          assigned_tests: selectedTests,
+          total_bill: totalBill
+        })
+        .eq('id', patientId);
+
+      if (error) throw error;
+      
       showToast('Patient updated successfully!', 'success');
       router.push('/patients');
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `patients/${patientId}`, auth);
+      console.error('Error updating patient:', error);
       showToast('Failed to update patient. Please try again.', 'error');
     } finally {
       setLoading(false);
@@ -243,20 +260,20 @@ export default function EditPatientPage() {
                     type="text"
                     placeholder="e.g. SELF"
                     className="w-full px-4 py-3 border border-border-color rounded-xl focus:outline-none focus:ring-2 focus:ring-sage-primary/20 focus:border-sage-primary bg-bg-warm/50 font-medium text-text-main transition-all"
-                    value={formData.referredByDr}
-                    onChange={(e) => setFormData({...formData, referredByDr: e.target.value})}
+                    value={formData.referred_by_dr}
+                    onChange={(e) => setFormData({...formData, referred_by_dr: e.target.value})}
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-text-muted mb-2">Client Address</label>
+                  <label className="block text-sm font-medium text-text-muted mb-2">Address</label>
                   <div className="relative">
                     <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
                     <input
                       type="text"
                       placeholder="Address"
                       className="w-full pl-11 pr-4 py-3 border border-border-color rounded-xl focus:outline-none focus:ring-2 focus:ring-sage-primary/20 focus:border-sage-primary bg-bg-warm/50 font-medium text-text-main transition-all"
-                      value={formData.clientAddress}
-                      onChange={(e) => setFormData({...formData, clientAddress: e.target.value})}
+                      value={formData.address}
+                      onChange={(e) => setFormData({...formData, address: e.target.value})}
                     />
                   </div>
                 </div>

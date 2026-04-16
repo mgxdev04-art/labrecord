@@ -3,9 +3,7 @@
 import AppLayout from '@/components/AppLayout';
 import { useAuth } from '@/lib/AuthContext';
 import { useState, useEffect } from 'react';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
-import { db, auth } from '@/lib/firebase';
-import { handleFirestoreError, OperationType } from '@/lib/firestore-error';
+import { createClient } from '@/lib/supabase/client';
 import { LAB_TEMPLATES } from '@/lib/templates';
 import { useToast } from '@/components/Toast';
 import { User, Building, Stamp, IndianRupee, Save, Upload, Image } from 'lucide-react';
@@ -13,6 +11,7 @@ import { User, Building, Stamp, IndianRupee, Save, Upload, Image } from 'lucide-
 export default function SettingsPage() {
   const { user } = useAuth();
   const { showToast } = useToast();
+  const supabase = createClient();
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(true);
   
@@ -28,26 +27,29 @@ export default function SettingsPage() {
     
     const fetchProfile = async () => {
       try {
-        const docRef = doc(db, 'users', user.uid);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          const data = docSnap.data();
+        const { data, error } = await supabase
+          .from('user_settings')
+          .select('*')
+          .eq('user_id', user.id)
+          .single();
+        
+        if (data) {
           setFormData({
             name: data.name || '',
-            clinicName: data.clinicName || '',
-            doctorStampBase64: data.doctorStampBase64 || ''
+            clinicName: data.clinic_name || '',
+            doctorStampBase64: data.doctor_stamp_base64 || ''
           });
-          setTestCharges(data.testCharges || {});
+          setTestCharges(data.test_charges || {});
         }
       } catch (error) {
-        handleFirestoreError(error, OperationType.GET, `users/${user.uid}`, auth);
+        console.error('Error fetching settings:', error);
       } finally {
         setFetching(false);
       }
     };
     
     fetchProfile();
-  }, [user]);
+  }, [user, supabase]);
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -74,15 +76,24 @@ export default function SettingsPage() {
     
     setLoading(true);
     try {
-      await updateDoc(doc(db, 'users', user.uid), {
-        name: formData.name,
-        clinicName: formData.clinicName,
-        doctorStampBase64: formData.doctorStampBase64,
-        testCharges: testCharges
-      });
+      // Upsert user settings (insert if doesn't exist, update if exists)
+      const { error } = await supabase
+        .from('user_settings')
+        .upsert({
+          user_id: user.id,
+          name: formData.name,
+          clinic_name: formData.clinicName,
+          doctor_stamp_base64: formData.doctorStampBase64,
+          test_charges: testCharges
+        }, {
+          onConflict: 'user_id'
+        });
+
+      if (error) throw error;
+      
       showToast('Settings updated successfully!', 'success');
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}`, auth);
+      console.error('Error updating settings:', error);
       showToast('Failed to update settings. Please try again.', 'error');
     } finally {
       setLoading(false);

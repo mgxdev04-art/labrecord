@@ -3,14 +3,37 @@
 import AppLayout from '@/components/AppLayout';
 import { useAuth } from '@/lib/AuthContext';
 import { useState, useEffect } from 'react';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
-import { db, auth } from '@/lib/firebase';
-import { handleFirestoreError, OperationType } from '@/lib/firestore-error';
+import { createClient } from '@/lib/supabase/client';
 import { useRouter, useParams } from 'next/navigation';
 import { LAB_TEMPLATES } from '@/lib/templates';
 import Link from 'next/link';
 import { useToast } from '@/components/Toast';
 import { ArrowLeft, User, FileText, Calendar, Hash, Building, Check, X } from 'lucide-react';
+
+interface ReportResult {
+  name: string;
+  value: string;
+  unit: string;
+  normalRange: string;
+}
+
+interface ReportData {
+  id: string;
+  user_id: string;
+  patient_id: string;
+  patient_name: string;
+  test_name: string;
+  test_date: string;
+  results: ReportResult[];
+  notes: string | null;
+  status: string;
+  visit_lab_no: string | null;
+  refer_lab_hosp: string | null;
+  ref_client: string | null;
+  barcode_no: string | null;
+  sample_collection_date: string | null;
+  sample_received_date: string | null;
+}
 
 export default function EditReportPage() {
   const { user } = useAuth();
@@ -18,11 +41,12 @@ export default function EditReportPage() {
   const params = useParams();
   const reportId = params.id as string;
   const { showToast } = useToast();
+  const supabase = createClient();
   
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(true);
   
-  const [reportData, setReportData] = useState<any>(null);
+  const [reportData, setReportData] = useState<ReportData | null>(null);
   const [results, setResults] = useState<Record<string, string>>({});
   
   const [reportDetails, setReportDetails] = useState({
@@ -39,28 +63,42 @@ export default function EditReportPage() {
     
     const fetchReport = async () => {
       try {
-        const reportDocRef = doc(db, 'reports', reportId);
-        const reportDocSnap = await getDoc(reportDocRef);
+        const { data, error } = await supabase
+          .from('reports')
+          .select('*')
+          .eq('id', reportId)
+          .single();
         
-        if (reportDocSnap.exists()) {
-          const data = reportDocSnap.data();
-          if (data.doctorId !== user.uid) {
-            router.push('/reports');
-            return;
-          }
-          setReportData(data);
-          setResults(data.results || {});
-          setReportDetails({
-            visitLabNo: data.visitLabNo || '',
-            referLabHosp: data.referLabHosp || '',
-            refClient: data.refClient || '',
-            barcodeNo: data.barcodeNo || '',
-            sampleCollectionDate: data.sampleCollectionDate ? new Date(data.sampleCollectionDate).toISOString().slice(0, 16) : '',
-            sampleReceivedDate: data.sampleReceivedDate ? new Date(data.sampleReceivedDate).toISOString().slice(0, 16) : ''
-          });
-        } else {
+        if (error || !data) {
           router.push('/reports');
+          return;
         }
+        
+        // Check if user owns this report
+        if (data.user_id !== user.id) {
+          router.push('/reports');
+          return;
+        }
+        
+        setReportData(data);
+        
+        // Convert results array to object for form
+        const resultsObj: Record<string, string> = {};
+        if (data.results && Array.isArray(data.results)) {
+          data.results.forEach((result: ReportResult) => {
+            resultsObj[result.name] = result.value || '';
+          });
+        }
+        setResults(resultsObj);
+        
+        setReportDetails({
+          visitLabNo: data.visit_lab_no || '',
+          referLabHosp: data.refer_lab_hosp || '',
+          refClient: data.ref_client || '',
+          barcodeNo: data.barcode_no || '',
+          sampleCollectionDate: data.sample_collection_date ? new Date(data.sample_collection_date).toISOString().slice(0, 16) : '',
+          sampleReceivedDate: data.sample_received_date ? new Date(data.sample_received_date).toISOString().slice(0, 16) : ''
+        });
       } catch (error) {
         console.error("Error fetching report:", error);
       } finally {
@@ -69,9 +107,9 @@ export default function EditReportPage() {
     };
     
     fetchReport();
-  }, [user, reportId, router]);
+  }, [user, reportId, router, supabase]);
 
-  const selectedTemplate = LAB_TEMPLATES.find(t => t.id === reportData?.templateId);
+  const selectedTemplate = LAB_TEMPLATES.find(t => t.name === reportData?.test_name);
 
   const handleResultChange = (fieldName: string, value: string) => {
     setResults(prev => ({ ...prev, [fieldName]: value }));
@@ -79,24 +117,37 @@ export default function EditReportPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || !reportData) return;
+    if (!user || !reportData || !selectedTemplate) return;
     
     setLoading(true);
     try {
-      await updateDoc(doc(db, 'reports', reportId), {
-        results,
-        visitLabNo: reportDetails.visitLabNo,
-        referLabHosp: reportDetails.referLabHosp,
-        refClient: reportDetails.refClient,
-        barcodeNo: reportDetails.barcodeNo,
-        sampleCollectionDate: reportDetails.sampleCollectionDate ? new Date(reportDetails.sampleCollectionDate).toISOString() : null,
-        sampleReceivedDate: reportDetails.sampleReceivedDate ? new Date(reportDetails.sampleReceivedDate).toISOString() : null
-      });
+      // Convert results object back to array
+      const resultsArray = selectedTemplate.fields.map(field => ({
+        name: field.name,
+        value: results[field.name] || '',
+        unit: field.unit,
+        normalRange: field.normalRange
+      }));
+
+      const { error } = await supabase
+        .from('reports')
+        .update({
+          results: resultsArray,
+          visit_lab_no: reportDetails.visitLabNo || null,
+          refer_lab_hosp: reportDetails.referLabHosp || null,
+          ref_client: reportDetails.refClient || null,
+          barcode_no: reportDetails.barcodeNo || null,
+          sample_collection_date: reportDetails.sampleCollectionDate ? new Date(reportDetails.sampleCollectionDate).toISOString() : null,
+          sample_received_date: reportDetails.sampleReceivedDate ? new Date(reportDetails.sampleReceivedDate).toISOString() : null
+        })
+        .eq('id', reportId);
+
+      if (error) throw error;
       
       showToast('Report updated successfully!', 'success');
       router.push(`/reports/${reportId}`);
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `reports/${reportId}`, auth);
+      console.error('Error updating report:', error);
       showToast('Failed to update report. Please try again.', 'error');
     } finally {
       setLoading(false);
@@ -155,10 +206,10 @@ export default function EditReportPage() {
             <User className="w-6 h-6 text-sage-primary" />
           </div>
           <div>
-            <h2 className="text-lg font-semibold text-text-main">{reportData.patientName}</h2>
+            <h2 className="text-lg font-semibold text-text-main">{reportData.patient_name}</h2>
             <p className="text-sm text-text-muted flex items-center gap-2">
               <FileText className="w-4 h-4" />
-              {reportData.templateName}
+              {reportData.test_name}
             </p>
           </div>
         </div>
